@@ -1,0 +1,130 @@
+import pandas as pd
+import numpy as np
+import yfinance as yf
+import urllib.request
+import warnings
+
+warnings.filterwarnings("ignore")
+
+# ================================================= =
+# 1. TARGET PATTERN (CUSTOM DATES)
+# ================================================= =
+TARGET_SYMBOL = "xyz.NS" # अपनी पसंद का स्टॉक यहाँ डालें
+TARGET_START = "2026-01-07" # टारगेट पैटर्न शुरू होने की तारीख
+TARGET_END = "2026-04-01"   # टारगेट पैटर्न खत्म होने की तारीख
+
+print(f"📡 Loading Target Pattern for {TARGET_SYMBOL} from {TARGET_START} to {TARGET_END}...")
+
+target_df = yf.download(
+    TARGET_SYMBOL,
+    start=TARGET_START,
+    end=TARGET_END,
+    auto_adjust=True,
+    progress=False
+)
+
+if isinstance(target_df.columns, pd.MultiIndex):
+    target_df.columns = target_df.columns.get_level_values(0)
+
+target_close = target_df["Close"].dropna().values
+pattern_length = len(target_close)
+
+# Min-Max Normalization (for MAE)
+t_min, t_max = target_close.min(), target_close.max()
+target_norm_minmax = (target_close - t_min) / (t_max - t_min)
+
+# Standardize (for Correlation)
+t_std = (target_close - np.mean(target_close)) / np.std(target_close)
+
+# ================================================= =
+# 2. FETCH TICKERS & MATCH ANALYSIS
+# ================================================= =
+url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
+req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+
+try:
+    nifty500 = pd.read_csv(urllib.request.urlopen(req))
+    tickers = [str(s).strip() + ".NS" for s in nifty500["Symbol"]]
+except Exception:
+    tickers = ["TATAMOTORS.NS", "RELIANCE.NS", "INFY.NS", "TCS.NS", "HDFCBANK.NS"]
+
+print(f"🔎 Scanning Nifty 500 Stocks for Matching Pattern Dates...\n")
+
+detailed_results = []
+
+for symbol in tickers[:250]: # जरूरत पड़ने पर [:250] हटा सकते हैं
+    try:
+        df = yf.download(symbol, period="max", auto_adjust=True, progress=False)
+        if df.empty:
+            continue
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+
+        close_series = df["Close"].dropna()
+        close = close_series.values
+
+        if len(close) < pattern_length:
+            continue
+
+        best_corr = -1
+        best_mae = 999
+        best_start_idx = None
+        best_end_idx = None
+
+        max_search_idx = len(close) - pattern_length
+
+        # Sliding Window Pattern Match
+        for i in range(max_search_idx + 1):
+            window = close[i : i + pattern_length]
+            w_min, w_max = window.min(), window.max()
+            if w_max == w_min:
+                continue
+
+            window_norm_mm = (window - w_min) / (w_max - w_min)
+            w_std = (window - np.mean(window)) / np.std(window)
+
+            corr = np.corrcoef(t_std, w_std)[0, 1]
+            mae = np.mean(np.abs(target_norm_minmax - window_norm_mm))
+
+            if corr > best_corr:
+                best_corr = corr
+                best_mae = mae
+                best_start_idx = i
+                best_end_idx = i + pattern_length - 1
+
+        # केवल वे स्टॉक्स जो पैटर्न से मैच करते हैं (Corr >= 0.70)
+        if best_corr >= 0.70 and best_start_idx is not None:
+            start_date = close_series.index[best_start_idx].date()
+            end_date = close_series.index[best_end_idx].date()
+
+            detailed_results.append({
+                "Symbol": symbol.replace(".NS", ""),
+                "Pattern_Start_Date": start_date,
+                "Pattern_End_Date": end_date,
+                "Corr": round(best_corr, 2),
+                "MAE": round(best_mae, 2)
+            })
+
+    except Exception:
+        continue
+
+# ================================================= =
+# 3. FINAL OUTPUT (SORTED BY LATEST END DATE)
+# ================================================= =
+print("=" * 75)
+print("🎯 PATTERN MATCHING RESULTS: START & END DATES (LATEST FIRST)")
+print("=" * 75)
+
+if detailed_results:
+    df_out = pd.DataFrame(detailed_results)
+    
+    # सबसे हाल में (Latest) पूरा होने वाला पैटर्न सबसे ऊपर दिखेगा
+    df_out = df_out.sort_values(by="Pattern_End_Date", ascending=False)
+
+    pd.set_option('display.max_columns', None)
+    pd.set_option('display.width', 1000)
+
+    print("\n", df_out.to_string(index=False))
+    print("\n" + "-" * 75)
+else:
+    print("❌ कोई मैचिंग डेटा प्राप्त नहीं हुआ।")
