@@ -1,0 +1,169 @@
+!pip install yfinance pandas numpy scipy --quiet
+
+import pandas as pd
+import numpy as np
+import yfinance as yf
+from scipy.stats import linregress
+import urllib.request
+import warnings
+
+warnings.filterwarnings("ignore")
+
+# ==================================================
+# 1. TARGET PATTERN (ANGEL ONE)
+# ==================================================
+TARGET_SYMBOL = "PAYTM.NS"
+print("📡 Loading Angel One Target Pattern...")
+
+target_df = yf.download(
+    TARGET_SYMBOL,
+    start="2026-01-07",
+    end="2026-04-01",
+    auto_adjust=True,
+    progress=False
+)
+
+if isinstance(target_df.columns, pd.MultiIndex):
+    target_df.columns = target_df.columns.get_level_values(0)
+
+target_close = target_df["Close"].dropna().values
+pattern_length = len(target_close)
+
+# Min-Max Normalization (for MAE)
+t_min, t_max = target_close.min(), target_close.max()
+target_norm_minmax = (target_close - t_min) / (t_max - t_min)
+
+# Standardize (for Correlation)
+t_std = (target_close - np.mean(target_close)) / np.std(target_close)
+
+# ==================================================
+# 2. HELPER FUNCTION: SLOPE CALCULATOR
+# ==================================================
+def get_normalized_slope(segment):
+    if len(segment) < 2:
+        return 0.0
+    seg_min, seg_max = segment.min(), segment.max()
+    if seg_max == seg_min:
+        return 0.0
+    norm_seg = (segment - seg_min) / (seg_max - seg_min)
+    x = np.arange(len(norm_seg))
+    slope, _, _, _, _ = linregress(x, norm_seg)
+    return round(slope, 4)
+
+# ==================================================
+# 3. FETCH TICKERS & MATCH ANALYSIS
+# ==================================================
+url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
+req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+
+try:
+    nifty500 = pd.read_csv(urllib.request.urlopen(req))
+    tickers = [str(s).strip() + ".NS" for s in nifty500["Symbol"]]
+except Exception:
+    tickers = ["TATAMOTORS.NS", "RELIANCE.NS", "INFY.NS", "TCS.NS", "HDFCBANK.NS"]
+
+print(f"🔎 Scanning Nifty 500 Stocks & Calculating Future Return + Slope...\n")
+
+FORWARD_DAYS = 140
+detailed_results = []
+
+for symbol in tickers[:250]:  # Robust sample check
+    try:
+        df = yf.download(symbol, period="2y", auto_adjust=True, progress=False)
+        if df.empty:
+            continue
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+
+        close_series = df["Close"].dropna()
+        close = close_series.values
+
+        if len(close) < (pattern_length + FORWARD_DAYS):
+            continue
+
+        best_corr = -1
+        best_mae = 999
+        best_idx = None
+
+        max_search_idx = len(close) - FORWARD_DAYS - pattern_length
+
+        # Sliding Window Pattern Match
+        for i in range(max_search_idx):
+            window = close[i : i + pattern_length]
+            w_min, w_max = window.min(), window.max()
+            if w_max == w_min:
+                continue
+
+            window_norm_mm = (window - w_min) / (w_max - w_min)
+            w_std = (window - np.mean(window)) / np.std(window)
+
+            corr = np.corrcoef(t_std, w_std)[0, 1]
+            mae = np.mean(np.abs(target_norm_minmax - window_norm_mm))
+
+            if corr > best_corr:
+                best_corr = corr
+                best_mae = mae
+                best_idx = i + pattern_length - 1
+
+        # केवल वे मैचेस जो काम के हैं (Corr >= 0.70)
+        if best_corr >= 0.70 and best_idx is not None:
+            match_date = close_series.index[best_idx].date()
+
+            # मैच के ठीक बाद के 140 दिनों का डेटा
+            fwd_prices = close[best_idx + 1 : best_idx + 1 + FORWARD_DAYS]
+
+            if len(fwd_prices) >= FORWARD_DAYS:
+                # 1. Returns Calc (%)
+                ret_15d = round(((fwd_prices[14] - fwd_prices[0]) / fwd_prices[0]) * 100, 1)
+                ret_60d = round(((fwd_prices[59] - fwd_prices[0]) / fwd_prices[0]) * 100, 1)
+                ret_140d = round(((fwd_prices[139] - fwd_prices[0]) / fwd_prices[0]) * 100, 1)
+
+                # 2. Slope Calc
+                slope_15d = get_normalized_slope(fwd_prices[:15])
+                slope_60d = get_normalized_slope(fwd_prices[:60])
+                slope_140d = get_normalized_slope(fwd_prices[:140])
+
+                detailed_results.append({
+                    "Symbol": symbol.replace(".NS", ""),
+                    "Match_Date": match_date,
+                    "Corr": round(best_corr, 2),
+                    "MAE": round(best_mae, 2),
+                    "15D_Ret%": ret_15d,
+                    "15D_Slope": slope_15d,
+                    "60D_Ret%": ret_60d,
+                    "60D_Slope": slope_60d,
+                    "140D_Ret%": ret_140d,
+                    "140D_Slope": slope_140d
+                })
+
+    except Exception:
+        continue
+
+# ==================================================
+# 4. FINAL STOCK-BY-STOCK OUTPUT
+# ==================================================
+print("=" * 105)
+print("🎯 STOCK-BY-STOCK: MATCH METRICS vs FUTURE RETURN & SLOPE (AFTER 140 DAYS)")
+print("=" * 105)
+
+if detailed_results:
+    df_out = pd.DataFrame(detailed_results)
+
+    # 140-Day Return के हिसाब से बेस्ट शेयर्स सबसे ऊपर
+    df_out = df_out.sort_values(by="140D_Ret%", ascending=False)
+
+    # साफ़ सुथरी डिस्प्ले सेटिंग
+    pd.set_option('display.max_columns', None)
+    pd.set_option('display.width', 1000)
+
+    print("\n", df_out.to_string(index=False))
+
+    print("\n" + "-" * 105)
+    print("💡 इस टेबल को कैसे पढ़ें:")
+    print("1. Corr & MAE  : यह दिखाता है कि पैटर्न कितना परफेक्ट मैच हुआ था।")
+    print("2. 15D_Ret% / 15D_Slope   : मैच होने के अगले 15 दिनों में कितना % रिटर्न आया और किस स्लोप से चढ़ा।")
+    print("3. 140D_Ret% / 140D_Slope : मैच होने के अगले 140 दिनों का फाइनल रिटर्न और स्लोप।")
+    print("-" * 105)
+
+else:
+    print("❌ कोई मैचिंग डेटा प्राप्त नहीं ")
