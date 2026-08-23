@@ -1,0 +1,167 @@
+!pip install yfinance pandas numpy scipy --quiet
+
+import pandas as pd
+import numpy as np
+import yfinance as yf
+import urllib.request
+import warnings
+
+warnings.filterwarnings("ignore")
+
+# ==================================================
+# 1. Target Pattern Loading & Normalization
+# ==================================================
+TARGET_SYMBOL = "abc.NS"
+print("📡 Angel One Pattern Loading...")
+
+target_df = yf.download(
+    TARGET_SYMBOL,
+    start="2025-01-07",
+    end="2025-03-20",
+    auto_adjust=True,
+    progress=False
+)
+
+if target_df.empty:
+    raise Exception("Angel One data not found on Yahoo Finance!")
+
+# Handle MultiIndex columns safely
+if isinstance(target_df.columns, pd.MultiIndex):
+    target_close = target_df["Close"][TARGET_SYMBOL].dropna().values
+else:
+    target_close = target_df["Close"].dropna().values
+
+pattern_length = len(target_close)
+
+# Z-Score Standardize
+t_mean = np.mean(target_close)
+t_std = np.std(target_close)
+if t_std == 0:
+    raise Exception("Target pattern has zero variance.")
+
+target_norm = (target_close - t_mean) / t_std
+
+print(f"✅ Pattern Length = {pattern_length} candles")
+
+
+# ==================================================
+# 2. Fetch Nifty 500 Tickers
+# ==================================================
+url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
+req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+
+try:
+    nifty500 = pd.read_csv(urllib.request.urlopen(req))
+    tickers = [str(s).strip() + ".NS" for s in nifty500["Symbol"]]
+except Exception as e:
+    print(f"⚠️ NSE List Download Failed ({e}). Using core Nifty stocks.")
+    tickers = [
+        "TATAMOTORS.NS", "RELIANCE.NS", "INFY.NS", "TCS.NS", "HDFCBANK.NS",
+        "ICICIBANK.NS", "SBIN.NS", "BHARTIARTL.NS", "ITC.NS", "KOTAKBANK.NS",
+        "LTIM.NS", "AXISBANK.NS", "BAJFINANCE.NS", "MARUTI.NS", "SUNPHARMA.NS"
+    ]
+
+print(f"🔎 Total Stocks to Scan: {len(tickers)}")
+
+
+# ==================================================
+# 3. Fast Batch Scanning Engine
+# ==================================================
+print("⚡ Fast Scanning Active...")
+
+BATCH_SIZE = 50
+results = []
+
+for i in range(0, len(tickers), BATCH_SIZE):
+    batch_tickers = tickers[i : i + BATCH_SIZE]
+
+    try:
+        # Download batch data safely
+        data = yf.download(
+            batch_tickers,
+            period="250d",
+            auto_adjust=True,
+            progress=False,
+            group_by="ticker"
+        )
+
+        if data.empty:
+            continue
+
+        for symbol in batch_tickers:
+            try:
+                # Extract Close prices safely
+                if len(batch_tickers) == 1:
+                    df_sym = data
+                else:
+                    if symbol not in data.columns.levels[0]:
+                        continue
+                    df_sym = data[symbol]
+
+                if "Close" not in df_sym.columns:
+                    continue
+
+                close_series = df_sym["Close"].dropna()
+                close = close_series.values
+
+                if len(close) < pattern_length:
+                    continue
+
+                best_corr = -1.0
+                best_mae = 999.0
+                best_date = None
+
+                # Sliding Window Vector Scan
+                for j in range(len(close) - pattern_length + 1):
+                    window = close[j : j + pattern_length]
+                    w_std = np.std(window)
+
+                    if w_std == 0:
+                        continue
+
+                    # Z-Score Normalization
+                    window_norm = (window - np.mean(window)) / w_std
+
+                    # Pearson Correlation Calculation
+                    corr = np.corrcoef(target_norm, window_norm)[0, 1]
+                    mae = np.mean(np.abs(target_norm - window_norm))
+
+                    if corr > best_corr:
+                        best_corr = corr
+                        best_mae = mae
+                        best_date = close_series.index[j + pattern_length - 1]
+
+                # Record all valid matches (No strict drop threshold)
+                if best_corr > 0.3:
+                    results.append({
+                        "Symbol": symbol,
+                        "Corr": round(float(best_corr), 3),
+                        "MAE": round(float(best_mae), 3),
+                        "Date": best_date
+                    })
+
+            except Exception:
+                continue
+
+    except Exception:
+        continue
+
+
+# ==================================================
+# 4. Final Output Display
+# ==================================================
+print("\n" + "=" * 75)
+print("🎯 TOP BEST PATTERN MATCHES FOUND")
+print("=" * 75)
+
+if results:
+    result_df = pd.DataFrame(results)
+    result_df["Date"] = pd.to_datetime(result_df["Date"]).dt.date
+
+    # Correlation के हिसाब से टॉप 15 स्टॉक्स सॉर्ट करें
+    result_df = result_df.sort_values(by="Corr", ascending=False).head(40)
+
+    print("\n", result_df.to_string(index=False))
+else:
+    print("❌ Yahoo Finance से डेटा फेच नहीं हो पाया। कृपया इंटरनेट कनेक्शन या Ticker सिंटैक्स चेक करें।")
+
