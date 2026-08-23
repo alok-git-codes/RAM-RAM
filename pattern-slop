@@ -12,7 +12,7 @@ warnings.filterwarnings("ignore")
 # ==================================================
 # 1. TARGET PATTERN (ANGEL ONE)
 # ==================================================
-TARGET_SYMBOL = "PAYTM.NS"
+TARGET_SYMBOL = "xyz.NS"
 print("📡 Loading Angel One Target Pattern...")
 
 target_df = yf.download(
