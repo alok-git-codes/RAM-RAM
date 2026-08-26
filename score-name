@@ -1,0 +1,150 @@
+import time
+import pandas as pd
+import yfinance as yf
+
+def display_title():
+    print("\033[1;36m")
+    print("    ╔═══════════════════════════════════════════════════════════════════════╗")
+    print("    ║          LIVE NIFTY 50 STOCK SCREENER SYSTEM (yfinance)               ║")
+    print("    ╚═══════════════════════════════════════════════════════════════════════╝")
+    print("\033[0m")
+    print("\033[1;33m📊 Fetching Live Market Data from Yahoo Finance 📊\033[0m\n")
+
+# Function to fetch live Nifty 50 stocks from NSE official CSV or use a sample for fast testing
+def get_live_stock_data():
+    print("⏳ Downloading live data for top stocks (Please wait)...")
+    
+    # यहाँ हम कुछ लोकप्रिय भारतीय शेयरों के सिंबल ले रहे हैं (Yahoo Finance के लिए पीछे .NS लगाना पड़ता है)
+    tickers = ["RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS", "ITC.NS", "SBIN.NS", "BHARTIARTL.NS"]
+    
+    stock_list = []
+    
+    for ticker in tickers:
+        try:
+            stock = yf.Ticker(ticker)
+            # पिछले 1 साल का ऐतिहासिक डेटा लेते हैं ताकि 50-day और 200-day Moving Average निकल सके
+            hist = stock.history(period="1y")
+            info = stock.info
+            
+            if hist.empty:
+                continue
+                
+            current_price = hist['Close'].iloc[-1]
+            ma_50 = hist['Close'].rolling(window=50).mean().iloc[-1]
+            ma_200 = hist['Close'].rolling(window=200).mean().iloc[-1] if len(hist) >= 200 else ma_50
+            
+            # फंडामेंटल डेटा (अगर उपलब्ध न हो तो डिफॉल्ट वैल्यू सेट करेंगे)
+            pe_ratio = info.get('trailingPE', 20.0)
+            if pe_ratio is None: pe_ratio = 20.0
+            
+            debt_equity = info.get('debtToEquity', 50.0) / 100.0 if info.get('debtToEquity') else 0.5
+            dividend_yield = info.get('dividendYield', 0.01) * 100 if info.get('dividendYield') else 0.0
+            sector = info.get('sector', 'General')
+            
+            stock_list.append({
+                "symbol": ticker.replace(".NS", ""),
+                "current_price": round(float(current_price), 2),
+                "ma_50": round(float(ma_50), 2),
+                "ma_200": round(float(ma_200), 2),
+                "pe_ratio": round(float(pe_ratio), 2),
+                "debt_equity": round(float(debt_equity), 2),
+                "dividend_yield": round(float(dividend_yield), 2),
+                "sector": sector
+            })
+        except Exception as e:
+            print(f"Error fetching {ticker}: {e}")
+            
+    return stock_list
+
+# Main analysis logic (पुराने लॉजिक की तरह)
+def analyze_stocks(stock_list):
+    results = []
+    strong_buy, moderate_buy, hold, sell = 0, 0, 0, 0
+    
+    for stock in stock_list:
+        symbol = stock["symbol"]
+        current_price = stock["current_price"]
+        ma_50 = stock["ma_50"]
+        ma_200 = stock["ma_200"]
+        pe_ratio = stock["pe_ratio"]
+        debt_equity = stock["debt_equity"]
+        dividend_yield = stock["dividend_yield"]
+        sector = stock["sector"]
+        
+        technical_score, value_score, financial_health_score, income_score = 0, 0, 0, 0
+        
+        # Technical Logic
+        if current_price > ma_50 and current_price > ma_200:
+            technical_score += 2
+        elif current_price > ma_50:
+            technical_score += 1
+        elif current_price < ma_50 and current_price < ma_200:
+            technical_score -= 2
+            
+        if ma_50 > ma_200:
+            technical_score += 1
+            
+        # Value Logic
+        if pe_ratio < 15: value_score += 2
+        elif pe_ratio < 25: value_score += 1
+        elif pe_ratio > 40: value_score -= 1
+        
+        # Financial Health
+        if debt_equity < 0.3: financial_health_score += 2
+        elif debt_equity < 0.7: financial_health_score += 1
+        elif debt_equity > 1.5: financial_health_score -= 2
+        
+        # Income
+        if dividend_yield > 3.0: income_score += 2
+        elif dividend_yield > 1.0: income_score += 1
+        
+        total_score = technical_score + value_score + financial_health_score + income_score
+        
+        if total_score >= 5:
+            rating = "Strong Buy"
+            strong_buy += 1
+        elif total_score >= 2:
+            rating = "Moderate Buy"
+            moderate_buy += 1
+        elif total_score >= -1:
+            rating = "Hold"
+            hold += 1
+        else:
+            rating = "Sell"
+            sell += 1
+            
+        results.append({
+            "symbol": symbol,
+            "sector": sector,
+            "current_price": current_price,
+            "rating": rating,
+            "total_score": total_score,
+            "pe_ratio": pe_ratio,
+            "dividend_yield": dividend_yield
+        })
+        
+    return results, {"strong_buy": strong_buy, "moderate_buy": moderate_buy, "hold": hold, "sell": sell}
+
+def main():
+    display_title()
+    stocks = get_live_stock_data()
+    
+    if not stocks:
+        print("❌ Could not fetch live data. Please check internet connection.")
+        return
+        
+    results, counts = analyze_stocks(stocks)
+    
+    print("\n" + "="*50)
+    print("          LIVE SCREENING RESULTS          ")
+    print("="*50)
+    
+    for stock in results:
+        print(f"🔹 {stock['symbol']} ({stock['sector']}) | Price: ₹{stock['current_price']} | Rating: {stock['rating']} | Score: {stock['total_score']:+}")
+
+    print("\n📈 Summary:")
+    print(f"Strong Buy: {counts['strong_buy']} | Moderate Buy: {counts['moderate_buy']} | Hold: {counts['hold']} | Sell: {counts['sell']}")
+
+if __name__ == "__main__":
+    main()
+
