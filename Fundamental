@@ -1,0 +1,168 @@
+import requests
+from bs4 import BeautifulSoup
+import yfinance as yf
+from textblob import TextBlob
+import pandas as pd
+import numpy as np
+from sklearn.ensemble import RandomForestClassifier
+import time  # 1. यहाँ time मॉड्यूल इम्पोर्ट किया गया है
+import warnings
+warnings.filterwarnings('ignore')
+
+class Nifty500MLScanner:
+    def __init__(self):
+        self.ml_model = self._train_initial_ml_engine()
+
+    def _train_initial_ml_engine(self):
+        training_data = pd.DataFrame([
+            [85, 75, 70, 1], [30, 40, 30, 0], [90, 80, 85, 1],
+            [40, 20, 50, 0], [70, 65, 60, 1], [25, 80, 20, 0],
+            [80, 35, 75, 1], [50, 50, 50, 0]
+        ], columns=['Fundamental', 'Technical', 'Sentiment', 'Target'])
+
+        X = training_data[['Fundamental', 'Technical', 'Sentiment']]
+        y = training_data['Target']
+
+        model = RandomForestClassifier(n_estimators=100, random_state=42)
+        model.fit(X, y)
+        return model
+
+    def load_nifty500_symbols(self):
+        url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        try:
+            res = requests.get(url, headers=headers)
+            df = pd.read_csv(url)
+            return df['Symbol'].tolist()
+        except Exception as e:
+            print(f"❌ Nifty 500 लिस्ट लोड करने में त्रुटि: {e}")
+            return ['RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'ICICIBANK']
+
+    def get_fundamental_score(self, symbol):
+        url = f"https://www.screener.in/company/{symbol}/consolidated/"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        try:
+            res = requests.get(url, headers=headers, timeout=5)
+            if res.status_code != 200:
+                res = requests.get(f"https://www.screener.in/company/{symbol}/", headers=headers, timeout=5)
+
+            soup = BeautifulSoup(res.content, 'html.parser')
+            ratios = {}
+            for li in soup.find_all('li', class_='flex flex-space-between'):
+                name = li.find('span', class_='name').text.strip()
+                val = li.find('span', class_='number')
+                if val:
+                    ratios[name] = val.text.strip().replace(',', '')
+
+            pe = float(ratios.get('Stock P/E', 0))
+            roce = float(ratios.get('ROCE', 0))
+            roe = float(ratios.get('ROE', 0))
+            debt_eq = float(ratios.get('Debt to equity', 0))
+
+            score = 0
+            if 0 < pe < 35: score += 25
+            if roce > 15: score += 25
+            if roe > 15: score += 25
+            if debt_eq < 0.7: score += 25
+            return score
+        except:
+            return 50
+
+    def get_technical_score(self, symbol):
+        try:
+            ticker = f"{symbol}.NS"
+            # 6m की जगह 6mo किया गया है ताकि yfinance एरर न दे
+            df = yf.download(ticker, period="6mo", interval="1d", progress=False)
+            if df.empty: return 50
+
+            delta = df['Close'].diff()
+            gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+            rs = gain / loss
+            df['RSI'] = 100 - (100 / (1 + rs))
+
+            df['SMA_20'] = df['Close'].rolling(20).mean()
+            df['SMA_50'] = df['Close'].rolling(50).mean()
+
+            close = df['Close'].iloc[-1].item() if isinstance(df['Close'].iloc[-1], pd.Series) else df['Close'].iloc[-1]
+            rsi = df['RSI'].iloc[-1].item() if isinstance(df['RSI'].iloc[-1], pd.Series) else df['RSI'].iloc[-1]
+            sma_20 = df['SMA_20'].iloc[-1].item() if isinstance(df['SMA_20'].iloc[-1], pd.Series) else df['SMA_20'].iloc[-1]
+            sma_50 = df['SMA_50'].iloc[-1].item() if isinstance(df['SMA_50'].iloc[-1], pd.Series) else df['SMA_50'].iloc[-1]
+
+            score = 50
+            if 40 <= rsi <= 65: score += 25
+            if close > sma_20 > sma_50: score += 25
+            return score
+        except:
+            return 50
+
+    def get_sentiment_score(self, symbol):
+        rss_url = f"https://news.google.com/rss/search?q={symbol}+share+stock+india&hl=en-IN&gl=IN&ceid=IN:en"
+        try:
+            res = requests.get(rss_url, timeout=5)
+            soup = BeautifulSoup(res.content, 'xml')
+            items = soup.find_all('item')[:5]
+
+            polarities = []
+            for item in items:
+                analysis = TextBlob(item.title.text)
+                polarities.append(analysis.sentiment.polarity)
+
+            avg_pol = np.mean(polarities) if polarities else 0
+            return int((avg_pol + 1) * 50)
+        except:
+            return 50
+
+    def scan_market(self, limit=10):
+        symbols = self.load_nifty500_symbols()
+        print(f"🚀 Nifty 500 स्कैनिंग शुरू... (कुल शेयर: {len(symbols)})")
+
+        results = []
+        for symbol in symbols[:limit]:
+            print(f"Scanning: {symbol}...")
+
+            f_score = self.get_fundamental_score(symbol)
+            t_score = self.get_technical_score(symbol)
+            s_score = self.get_sentiment_score(symbol)
+
+            input_features = pd.DataFrame([[f_score, t_score, s_score]],
+                                          columns=['Fundamental', 'Technical', 'Sentiment'])
+
+            ml_pred = self.ml_model.predict(input_features)[0]
+            confidence = self.ml_model.predict_proba(input_features)[0][1] * 100
+            composite_360d = (f_score * 0.4) + (t_score * 0.4) + (s_score * 0.2)
+
+            results.append({
+                'Symbol': symbol,
+                'Fundamental (40%)': f_score,
+                'Technical (40%)': t_score,
+                'Sentiment (20%)': s_score,
+                '360D Score': round(composite_360d, 1),
+                'ML Confidence': f"{confidence:.1f}%",
+                'ML Signal': 'STRONG BUY' if ml_pred == 1 and confidence > 60 else ('NEUTRAL' if ml_pred == 1 else 'AVOID')
+            })
+
+            # 2. यहाँ time.sleep(1) Loop के अंदर जुड़ा है (ब्लॉक होने से बचाने के लिए)
+            time.sleep(1)
+
+        results_df = pd.DataFrame(results)
+        results_df = results_df.sort_values(by='360D Score', ascending=False)
+        return results_df
+
+# --------------------------------------------------
+# Execution Block
+# --------------------------------------------------
+if __name__ == "__main__":
+    scanner = Nifty500MLScanner()
+
+    # 500 पूरा स्कैन करने के लिए limit=500 करें (अभी टेस्ट के लिए 10 है)
+    report_df = scanner.scan_market(limit=500)
+
+    print("\n==========================================================================")
+    print("                      📊 360D ML MARKET SCANNER REPORT                    ")
+    print("==========================================================================")
+    print(report_df.to_string(index=False))
+
+    # 3. यहाँ CSV में सेव करने की लाइनें जुड़ी हैं
+    report_df.to_csv("Nifty500_360D_Report.csv", index=False)
+    print("\n✅ पूरी रिपोर्ट Nifty500_360D_Report.csv फाइल में सफलतापूर्वक सेव हो गई है !")
