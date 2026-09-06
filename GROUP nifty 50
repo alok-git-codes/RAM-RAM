@@ -1,0 +1,73 @@
+import pandas as pd
+import yfinance as yf
+import numpy as np
+
+def classify_market_performance():
+    # 1. NSE Nifty 100 CSV लोड करें
+    url = "https://archives.nseindia.com/content/indices/ind_nifty100list.csv"
+    
+    try:
+        df_nifty = pd.read_csv(url)
+        print(f"कुल {len(df_nifty)} स्टॉक्स लोड किए गए। डेटा प्रोसेसिंग चालू है...\n")
+    except Exception as e:
+        print(f"CSV लोड करने में त्रुटि: {e}")
+        return
+
+    symbols = [f"{symbol}.NS" for symbol in df_nifty['Symbol'].tolist()]
+    
+    # त्वरित परीक्षण के लिए पहले 15 स्टॉक्स
+    sample_symbols = symbols[:15]
+    
+    results = []
+
+    for symbol in sample_symbols:
+        ticker = yf.Ticker(symbol)
+        data = ticker.history(period="3mo")
+
+        if data.empty or len(data) < 20:
+            continue
+
+        S_t = data['Close'].iloc[-1]
+        K = data['Close'].tail(20).mean() # 20-Day Moving Average
+
+        # ln(S_t / K) फॉर्मूला
+        log_moneyness = np.log(S_t / K)
+        
+        results.append({
+            'Symbol': symbol,
+            'S_t': round(S_t, 2),
+            'K': round(K, 2),
+            'Log_Return': log_moneyness
+        })
+
+    df_res = pd.DataFrame(results)
+
+    # Z-Score Calculation (पूरे बाज़ार के सापेक्ष रैंकिंग)
+    mean_ret = df_res['Log_Return'].mean()
+    std_ret = df_res['Log_Return'].std()
+    
+    df_res['Z_Score'] = (df_res['Log_Return'] - mean_ret) / std_ret
+
+    # पॉइंट्स और कैटेगरी असाइन करें
+    # Z-Score > 0 मतलब एवरेज से बेहतर प्रदर्शन
+    df_res['Category'] = np.where(df_res['Z_Score'] > 0, 'WINNER (मजबूत)', 'LOSER (कमजोर)')
+    df_res['Points'] = np.where(df_res['Z_Score'] > 0, +10, -5)
+
+    # 2 अलग-अलग ग्रुप्स में बाँटना
+    winners = df_res[df_res['Category'] == 'WINNER (मजबूत)'].sort_values(by='Z_Score', ascending=False)
+    losers = df_res[df_res['Category'] == 'LOSER (कमजोर)'].sort_values(by='Z_Score')
+
+    # --- प्रिंट आउटपुट ---
+    print("="*75)
+    print(" 🚀 GROUP 1: अच्छा प्रदर्शन करने वाले स्टॉक्स (WINNERS - Points: +10)")
+    print("="*75)
+    print(winners[['Symbol', 'S_t', 'K', 'Log_Return', 'Z_Score', 'Points']].to_string(index=False))
+
+    print("\n" + "="*75)
+    print(" 🔻 GROUP 2: कमजोर प्रदर्शन करने वाले स्टॉक्स (LOSERS - Points: -5)")
+    print("="*75)
+    print(losers[['Symbol', 'S_t', 'K', 'Log_Return', 'Z_Score', 'Points']].to_string(index=False))
+
+if __name__ == "__main__":
+    classify_market_performance()
+
