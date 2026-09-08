@@ -1,0 +1,159 @@
+!pip install yfinance pandas numpy scipy --quiet
+
+import pandas as pd
+import numpy as np
+import yfinance as yf
+from scipy.stats import linregress
+import urllib.request
+import warnings
+
+warnings.filterwarnings("ignore")
+
+# ==================================================
+# 1. SCANNER PARAMETERS
+# ==================================================
+MAX_DAYS = 140  
+RANGES = [15, 30, 60, 90, 140]  
+
+print("📡 Fetching Stock List for DOWNTREND Scan...")
+
+url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
+req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+
+try:
+    nifty500 = pd.read_csv(urllib.request.urlopen(req))
+    tickers = [str(s).strip() + ".NS" for s in nifty500["Symbol"]]
+except Exception:
+    tickers = [
+        "ANGELONE.NS", "TATAMOTORS.NS", "RELIANCE.NS", "INFY.NS", "TCS.NS",
+        "HDFCBANK.NS", "ICICIBANK.NS", "SBIN.NS", "BHARTIARTL.NS", "ITC.NS"
+    ]
+
+print(f"🔎 Total Stocks: {len(tickers)} | Scanning Downtrend in last {MAX_DAYS} candles...\n")
+
+
+# ==================================================
+# 2. DOWNTREND SLOPE & RANGE CALCULATOR
+# ==================================================
+def analyze_downtrend_ranges(symbol, df_close):
+    if len(df_close) < MAX_DAYS:
+        return None
+
+    close_vals = df_close.values
+    dates = df_close.index
+
+    range_analysis = {}
+    best_range = None
+    best_score = -999
+    best_start_date = None
+    best_completion_date = None
+
+    for r in RANGES:
+        segment = close_vals[-r:]
+        segment_dates = dates[-r:]
+
+        seg_min, seg_max = segment.min(), segment.max()
+        if seg_max == seg_min:
+            continue
+        norm_segment = (segment - seg_min) / (seg_max - seg_min)
+
+        x = np.arange(len(norm_segment))
+        slope, intercept, r_value, p_value, std_err = linregress(x, norm_segment)
+        r_squared = r_value ** 2
+
+        # डाउनट्रेंड देखने के लिए सिर्फ नेगेटिव स्लोप (मंदी) पर ध्यान देंगे
+        if slope < 0:
+            # -slope करने से जितना तीखा डाउनट्रेंड होगा, स्कोर उतना बड़ा बनेगा
+            downtrend_score = (-slope) * r_squared
+        else:
+            downtrend_score = -999
+
+        range_analysis[f"{r}D_Slope"] = round(slope, 4)
+
+        if downtrend_score > best_score:
+            best_score = downtrend_score
+            best_range = f"{r} Days"
+            best_start_date = pd.to_datetime(segment_dates[0]).strftime('%Y-%m-%d')
+            best_completion_date = pd.to_datetime(segment_dates[-1]).strftime('%Y-%m-%d')
+
+    # अगर किसी भी रेंज में डाउनट्रेंड नहीं मिला
+    if best_score == -999 or not range_analysis:
+        return None
+
+    return {
+        "Symbol": symbol,
+        "Best_Range": best_range,
+        "Start_Date": best_start_date,
+        "Completion_Date": best_completion_date,
+        "15D_Slope": range_analysis.get("15D_Slope", 0),
+        "30D_Slope": range_analysis.get("30D_Slope", 0),
+        "60D_Slope": range_analysis.get("60D_Slope", 0),
+        "140D_Slope": range_analysis.get("140D_Slope", 0),
+        "Down_Score": round(best_score, 4)
+    }
+
+
+# ==================================================
+# 3. BATCH PROCESSOR
+# ==================================================
+BATCH_SIZE = 50
+all_results = []
+
+for i in range(0, len(tickers), BATCH_SIZE):
+    batch = tickers[i : i + BATCH_SIZE]
+    try:
+        data = yf.download(
+            batch,
+            period="1y",
+            auto_adjust=True,
+            progress=False,
+            group_by="ticker"
+        )
+
+        for sym in batch:
+            try:
+                if len(batch) == 1:
+                    df_sym = data
+                else:
+                    if sym not in data.columns.levels[0]:
+                        continue
+                    df_sym = data[sym]
+
+                if "Close" in df_sym.columns:
+                    close_s = df_sym["Close"].dropna()
+                    res = analyze_downtrend_ranges(sym, close_s)
+                    if res:
+                        all_results.append(res)
+            except Exception:
+                continue
+
+    except Exception:
+        continue
+
+
+# ==================================================
+# 4. RESULT DISPLAY
+# ==================================================
+print("=" * 100)
+print("🔻 TOP DOWNTREND STOCKS REPORT (MOST WEAK STOCKS)")
+print("=" * 100)
+
+if all_results:
+    df_res = pd.DataFrame(all_results)
+    # सबसे ज्यादा डाउनट्रेंड वाले शेयर (Highest Down_Score) ऊपर
+    df_res = df_res.sort_values(by="Down_Score", ascending=False)
+
+    output_df = df_res[[
+        "Symbol", "Best_Range", "Start_Date", "Completion_Date",
+        "15D_Slope", "140D_Slope", "Down_Score"
+    ]].head(20)
+
+    print("\n", output_df.to_string(index=False))
+
+    print("\n" + "-" * 100)
+    print("💡 डाउनट्रेंड रिपोर्ट को कैसे समझें:")
+    print("1. Down_Score : यह जितना ज्यादा होगा, शेयर में उतनी ही साफ और तीखी मंदी (Strong Downtrend) है।")
+    print("2. Slope Value : इस रिपोर्ट में स्लोप वैल्यू नेगेटिव (-) होगी (उदा. -0.0650), जो गिरावट दर्शाती है।")
+    print("-" * 100)
+else:
+    print("❌ कोई मजबूत डाउनट्रेंड वाला शेयर नहीं मिला या डेटा प्राप्त नहीं हुआ।")
