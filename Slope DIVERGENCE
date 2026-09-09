@@ -1,0 +1,156 @@
+!pip install yfinance pandas numpy scipy --quiet
+
+import pandas as pd
+import numpy as np
+import yfinance as yf
+from scipy.stats import linregress
+import urllib.request
+import warnings
+
+warnings.filterwarnings("ignore")
+
+# ==================================================
+# 1. SCANNER PARAMETERS
+# ==================================================
+MAX_DAYS = 140
+
+print("📡 Fetching Stock List for DIVERGENCE Scan...")
+
+url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
+req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+
+try:
+    nifty500 = pd.read_csv(urllib.request.urlopen(req))
+    tickers = [str(s).strip() + ".NS" for s in nifty500["Symbol"]]
+except Exception:
+    tickers = [
+        "ANGELONE.NS", "TATAMOTORS.NS", "RELIANCE.NS", "INFY.NS", "TCS.NS",
+        "HDFCBANK.NS", "ICICIBANK.NS", "SBIN.NS", "BHARTIARTL.NS", "ITC.NS"
+    ]
+
+print(f"🔎 Total Stocks: {len(tickers)} | Scanning Reversals in last {MAX_DAYS} candles...\n")
+
+
+# ==================================================
+# 2. DIVERGENCE / REVERSAL CALCULATOR FUNCTION
+# ==================================================
+def calculate_slope(segment):
+    seg_min, seg_max = segment.min(), segment.max()
+    if seg_max == seg_min:
+        return 0, 0
+    norm_segment = (segment - seg_min) / (seg_max - seg_min)
+    x = np.arange(len(norm_segment))
+    slope, intercept, r_value, p_value, std_err = linregress(x, norm_segment)
+    return slope, r_value ** 2
+
+def detect_divergence(symbol, df_close):
+    if len(df_close) < MAX_DAYS:
+        return None
+
+    close_vals = df_close.values
+    dates = df_close.index
+
+    # 1. लंबा ट्रेंड जांचें (पिछले 60 दिनों का स्लोप)
+    long_segment = close_vals[-60:]
+    long_slope, long_r2 = calculate_slope(long_segment)
+
+    # 2. हालिया ट्रेंड जांचें (पिछले 10 दिनों का स्लोप)
+    short_days = 10
+    short_segment = close_vals[-short_days:]
+    short_slope, short_r2 = calculate_slope(short_segment)
+
+    divergence_type = None
+    div_score = 0
+
+    # Bullish Divergence: लंबा ट्रेंड डाउन (Negative Slope) था, पर हाल के 10 दिनों में अचानक अपट्रेंड (Positive Slope) आया
+    if long_slope < -0.015 and short_slope > 0.02:
+        divergence_type = "BULLISH DIVERGENCE (Upturn)"
+        div_score = short_slope * short_r2 * abs(long_slope)
+
+    # Bearish Divergence: लंबा ट्रेंड अप (Positive Slope) था, पर हाल के 10 दिनों में अचानक डाउनट्रेंड (Negative Slope) आया
+    elif long_slope > 0.015 and short_slope < -0.02:
+        divergence_type = "BEARISH DIVERGENCE (Downturn)"
+        div_score = abs(short_slope) * short_r2 * long_slope
+
+    if not divergence_type:
+        return None
+
+    # डायवर्जन किस तारीख से शुरू हुआ (Pivot Point Date)
+    divergence_date = pd.to_datetime(dates[-short_days]).strftime('%Y-%m-%d')
+    current_date = pd.to_datetime(dates[-1]).strftime('%Y-%m-%d')
+
+    return {
+        "Symbol": symbol,
+        "Divergence_Type": divergence_type,
+        "Divergence_Start_Date": divergence_date,  # जहाँ से ट्रेंड मुड़ा
+        "Latest_Date": current_date,               # आज/हालिया तारीख
+        "60D_Prev_Slope": round(long_slope, 4),    # पुराना ट्रेंड
+        "10D_New_Slope": round(short_slope, 4),    # नया मुड़ा हुआ ट्रेंड
+        "Score": round(div_score, 5)
+    }
+
+
+# ==================================================
+# 3. BATCH PROCESSOR
+# ==================================================
+BATCH_SIZE = 50
+all_results = []
+
+for i in range(0, len(tickers), BATCH_SIZE):
+    batch = tickers[i : i + BATCH_SIZE]
+    try:
+        data = yf.download(
+            batch,
+            period="1y",
+            auto_adjust=True,
+            progress=False,
+            group_by="ticker"
+        )
+
+        for sym in batch:
+            try:
+                if len(batch) == 1:
+                    df_sym = data
+                else:
+                    if sym not in data.columns.levels[0]:
+                        continue
+                    df_sym = data[sym]
+
+                if "Close" in df_sym.columns:
+                    close_s = df_sym["Close"].dropna()
+                    res = detect_divergence(sym, close_s)
+                    if res:
+                        all_results.append(res)
+            except Exception:
+                continue
+
+    except Exception:
+        continue
+
+
+# ==================================================
+# 4. RESULT DISPLAY
+# ==================================================
+print("=" * 110)
+print("🔀 FRESH DIVERGENCE / TREND REVERSAL REPORT")
+print("=" * 110)
+
+if all_results:
+    df_res = pd.DataFrame(all_results)
+    df_res = df_res.sort_values(by="Score", ascending=False)
+
+    output_df = df_res[[
+        "Symbol", "Divergence_Type", "Divergence_Start_Date",
+        "Latest_Date", "60D_Prev_Slope", "10D_New_Slope", "Score"
+    ]].head(20)
+
+    print("\n", output_df.to_string(index=False))
+
+    print("\n" + "-" * 110)
+    print("💡 डायवर्जन रिपोर्ट को कैसे समझें:")
+    print("1. Divergence_Start_Date : यह वही तारीख है जहाँ से शेयर का पुराना ट्रेंड टूटकर नया डायवर्जन शुरू हुआ।")
+    print("2. BULLISH DIVERGENCE   : शेयर लंबे समय से गिर रहा था (Prev Slope -ve) और हाल ही में ऊपर मुड़ गया (+ve Slope)।")
+    print("3. BEARISH DIVERGENCE   : शेयर लंबे समय से बढ़ रहा था (Prev Slope +ve) और हाल ही में नीचे गिरना शुरू हुआ (-ve Slope)।")
+    print("-" * 110)
+else:
+    print("❌ हाल ही में किसी भी शेयर में मजबूत डायवर्जन/रिवर्सल नहीं मिला।")
